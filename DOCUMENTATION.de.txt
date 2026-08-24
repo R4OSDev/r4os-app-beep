@@ -3,18 +3,23 @@
 
 BEEP.R4X ist ein einfaches Terminal-Werkzeug fuer den R4OS-Audiopfad.
 
+Seit 0.69.28 wird jeder 1024-Frame-Block mit der tatsaechlichen wirksamen
+R4SYS-Ereignisrate getaktet. Ein Restakkumulator verhindert Drift; es gibt
+keine feste 100-Hz-Annahme mehr.
+
 Projektstruktur seit 0.51.18:
 - `build.zig` ruft seit 0.58.29 nur noch den generischen SDK-R4MF-Treiber.
 - `build.zig.zon` bindet `r4os_sdk` als Paket.
 - `module.R4MF` v2 beschreibt Sprache, Quelle, Klasse, Ziel, Scope und Imports.
 
-Build:
+Build unter Linux beziehungsweise Windows:
 
-    DevTools\Scripts\Build.bat -app BEEP
+    ./Build.sh
+    Build.bat
 
 Ergebnis:
 
-    Code\zig-out\BEEP.R4X
+    Artifacts/Modules/BEEP/BEEP.R4X
 
 Contract:
 - fachlicher Einstieg: `r4_app_main`; das SDK exportiert `R4XStart`

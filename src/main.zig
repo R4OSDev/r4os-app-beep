@@ -30,13 +30,15 @@ pub fn r4_app_main(app: *r4os.App) i32 {
 
     var ok = true;
     var remaining: u32 = if (selftest) selftest_blocks else block_count;
+    const timer_hz = effectiveTimerHz(sys.monotonicHz());
+    var pacing_remainder: u64 = 0;
     while (remaining > 0) : (remaining -= 1) {
         const written = stream.write(pcm[0..], r4os.time_contract.timeoutForever());
         if (switch (written) {
             .written => |bytes| bytes != pcm.len,
             else => true,
         }) ok = false;
-        sys.sleepTicks(2);
+        sys.sleepTicks(ticksForFrames(block_frames, sample_rate, timer_hz, &pacing_remainder));
     }
 
     if (switch (stream.close(r4os.time_contract.timeoutForever())) {
@@ -49,6 +51,18 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     }
     sys.println(if (selftest) "BEEP selftest: FAILED" else "AUDIO STREAM FAILED");
     return 1;
+}
+
+fn effectiveTimerHz(value: u32) u64 {
+    return if (value == 0) 100 else value;
+}
+
+fn ticksForFrames(frames: u64, rate: u64, timer_hz: u64, remainder: *u64) u64 {
+    if (rate == 0) return 1;
+    const numerator = frames * timer_hz + remainder.*;
+    const ticks = numerator / rate;
+    remainder.* = numerator % rate;
+    return if (ticks == 0) 1 else ticks;
 }
 
 fn fillSquare(out: []u8) void {

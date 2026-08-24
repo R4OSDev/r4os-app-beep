@@ -3,9 +3,17 @@
 
 BEEP.R4X ist ein einfaches Terminal-Werkzeug fuer den R4OS-Audiopfad.
 
-Seit 0.69.28 wird jeder 1024-Frame-Block mit der tatsaechlichen wirksamen
-R4SYS-Ereignisrate getaktet. Ein Restakkumulator verhindert Drift; es gibt
-keine feste 100-Hz-Annahme mehr.
+Seit 0.69.29 besteht jeder Block aus 960 Frames beziehungsweise 3840 Byte und
+passt damit in genau ein AudioService-Payload. Acht angenommene Bloecke
+fuellen das 160-ms-HDA-Startfenster; danach und beim abschliessenden Leeren
+wird mit der tatsaechlichen wirksamen R4SYS-Ereignisrate getaktet. Ein
+Restakkumulator verhindert Drift; es gibt keine feste 100-Hz-Annahme mehr.
+
+Teilschreibfortschritt bleibt framegenau erhalten. Busy wiederholt nur den
+noch offenen Rest, Timeout und harte Fehler brechen die Ausgabe sichtbar ab.
+Der normale Ton umfasst genau 50 Bloecke beziehungsweise eine Sekunde. Der
+Selbsttest verwendet zehn Bloecke beziehungsweise 200 ms, erreicht damit den
+HDA-RUN-Pfad und wartet bis zum Ende des kurzen Tons.
 
 Projektstruktur seit 0.51.18:
 - `build.zig` ruft seit 0.58.29 nur noch den generischen SDK-R4MF-Treiber.

@@ -13,32 +13,35 @@ const selftest_arg = "/SELFTEST";
 
 comptime {
     if (block_bytes > r4os.app_audio.max_write_payload) @compileError("BEEP block exceeds one AudioService write payload");
-    if (@as(u64, selftest_blocks) * block_frames < audio_prefill_frames) @compileError("BEEP selftest cannot reach the HDA start window");
+    if (@as(u64, selftest_blocks) * block_frames < audio_prefill_frames) @compileError("BEEP selftest must cover the full 160-ms source lead");
 }
 
 const PlaybackPacer = struct {
     timer_hz: u64,
-    buffered_frames: u64 = 0,
-    remainder: u64 = 0,
+    end_scaled: ?u128 = null,
 
-    fn accepted(self: *PlaybackPacer, sys: r4os.r4sys.Context, bytes: usize) void {
-        self.buffered_frames += @as(u64, @intCast(bytes / frame_bytes));
-        if (self.buffered_frames <= audio_prefill_frames) return;
-        const paced_frames = self.buffered_frames - audio_prefill_frames;
-        self.buffered_frames = audio_prefill_frames;
-        self.sleepFrames(sys, paced_frames);
+    fn accepted(self: *PlaybackPacer, sys: r4os.r4sys.Context, bytes: usize, write_started: u64) void {
+        // Absolute source schedule in ticks * sample_rate, preserving fractions.
+        // RPC time counts too; an expired schedule grants no future burst credit.
+        const start = @as(u128, write_started) * sample_rate;
+        const end = @max(self.end_scaled orelse start, start) + @as(u128, bytes / frame_bytes) * self.timer_hz;
+        self.end_scaled = end;
+        // This is a source lead, not a receipt that the device has started.
+        self.waitUntil(sys, end -| (@as(u128, audio_prefill_frames) * self.timer_hz));
     }
 
     fn drain(self: *PlaybackPacer, sys: r4os.r4sys.Context) void {
-        const frames = self.buffered_frames;
-        self.buffered_frames = 0;
-        self.sleepFrames(sys, frames);
+        const end = self.end_scaled orelse return;
+        self.waitUntil(sys, end);
+        self.end_scaled = null;
     }
 
-    fn sleepFrames(self: *PlaybackPacer, sys: r4os.r4sys.Context, frames: u64) void {
-        if (frames == 0) return;
-        const wait_ticks = ticksForFrames(frames, sample_rate, self.timer_hz, &self.remainder);
-        if (wait_ticks != 0) sys.sleepTicks(wait_ticks);
+    fn waitUntil(_: *const PlaybackPacer, sys: r4os.r4sys.Context, deadline: u128) void {
+        while (true) {
+            const now = @as(u128, sys.ticks()) * sample_rate;
+            if (now >= deadline) return;
+            sys.sleepTicks(@intCast((deadline - now + sample_rate - 1) / sample_rate));
+        }
     }
 };
 
@@ -50,6 +53,11 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     fillSquare(pcm[0..]);
 
     sys.println(if (selftest) "BEEP selftest" else "BEEP AUDIO TEST");
+    const timer_hz = sys.monotonicHz();
+    if (timer_hz == 0 or !sys.hasFn("ticks") or !sys.hasFn("sleep_ticks")) {
+        sys.println("AUDIO CLOCK UNAVAILABLE");
+        return 1;
+    }
     var stream = switch (audio.openStream(sample_rate, channels, .s16le, r4os.app_audio.default_volume, r4os.time_contract.timeoutForever())) {
         .stream => |value| value,
         else => {
@@ -64,7 +72,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
 
     var ok = true;
     var remaining: u32 = if (selftest) selftest_blocks else block_count;
-    var pacer = PlaybackPacer{ .timer_hz = effectiveTimerHz(sys.monotonicHz()) };
+    var pacer = PlaybackPacer{ .timer_hz = timer_hz };
     while (remaining > 0) : (remaining -= 1) {
         if (!writeAudioBlock(sys, &stream, pcm[0..], &pacer)) {
             ok = false;
@@ -88,31 +96,20 @@ pub fn r4_app_main(app: *r4os.App) i32 {
 fn writeAudioBlock(sys: r4os.r4sys.Context, stream: *r4os.AudioStream, data: []const u8, pacer: *PlaybackPacer) bool {
     var cursor = r4os.app_audio.WriteCursor.init(data.len, frame_bytes) orelse return false;
     while (!cursor.done()) {
+        const write_started = sys.ticks();
         const advance = cursor.apply(stream.write(data[cursor.accepted..], r4os.time_contract.timeoutForever()));
         switch (advance.outcome) {
             .complete => {
-                if (advance.accepted != 0) pacer.accepted(sys, advance.accepted);
+                if (advance.accepted != 0) pacer.accepted(sys, advance.accepted, write_started);
                 return cursor.done();
             },
             .retry => {
-                if (advance.accepted != 0) pacer.accepted(sys, advance.accepted) else sys.sleepTicks(1);
+                if (advance.accepted != 0) pacer.accepted(sys, advance.accepted, write_started) else sys.sleepTicks(1);
             },
             .timed_out, .failure, .invalid => return false,
         }
     }
     return true;
-}
-
-fn effectiveTimerHz(value: u32) u64 {
-    return if (value == 0) 100 else value;
-}
-
-fn ticksForFrames(frames: u64, rate: u64, timer_hz: u64, remainder: *u64) u64 {
-    if (rate == 0) return 1;
-    const numerator = frames * timer_hz + remainder.*;
-    const ticks = numerator / rate;
-    remainder.* = numerator % rate;
-    return ticks;
 }
 
 fn fillSquare(out: []u8) void {

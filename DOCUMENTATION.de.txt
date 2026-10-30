@@ -5,9 +5,16 @@ BEEP.R4X ist ein einfaches Terminal-Werkzeug fuer den R4OS-Audiopfad.
 
 Seit 0.69.29 besteht jeder Block aus 960 Frames beziehungsweise 3840 Byte und
 passt damit in genau ein AudioService-Payload. Acht angenommene Bloecke
-fuellen das 160-ms-HDA-Startfenster; danach und beim abschliessenden Leeren
-wird mit der tatsaechlichen wirksamen R4SYS-Ereignisrate getaktet. Ein
-Restakkumulator verhindert Drift; es gibt keine feste 100-Hz-Annahme mehr.
+decken den 160-ms-Quellvorlauf ab. Dies ist keine HDA-Startquittung: HDA47
+startet regulaer nach zwei 480-Frame-Perioden oder seinem echten Tail-/Drainpfad.
+Ab 0.88.57/BEEP0.1.9 gilt eine absolute Hostfrist ab Beginn des jeweiligen
+Schreibversuchs. Quellarbeit, RPC-, Busy- und sonstige Wartezeit verbrauchen
+das Budget; eine abgelaufene Frist gibt kein spaeteres Zeitguthaben. Ganze
+Frames bleiben als Ticks*Samplerate ohne Rundungsdrift erhalten. Nur der
+positive Fristrest wird auf einen Ereignistick aufgerundet. Der abschliessende
+Hostwait deckt den verbleibenden Rest ab; danach folgt weiterhin das echte
+Close. Hostzeit belegt keine abgespielten Frames. Ohne ticks/sleep_ticks
+oder bekannte wirksame Ereignisrate bricht PCM vor Open sichtbar ab.
 
 Teilschreibfortschritt bleibt framegenau erhalten. Busy wiederholt nur den
 noch offenen Rest, Timeout und harte Fehler brechen die Ausgabe sichtbar ab.
@@ -16,7 +23,8 @@ Selbsttest verwendet zehn Bloecke beziehungsweise 200 ms, erreicht damit den
 HDA-RUN-Pfad und wartet bis zum Ende des kurzen Tons.
 
 Projektstruktur seit 0.51.18:
-- `build.zig` ruft seit 0.58.29 nur noch den generischen SDK-R4MF-Treiber.
+- `build.zig` verwendet den generischen SDK-R4MF-Treiber und einen eigenen
+  gezielten Hosttest-Step fuer den echten App-/SDK-Pfad.
 - `build.zig.zon` bindet `r4os_sdk` als Paket.
 - `module.R4MF` v2 beschreibt Sprache, Quelle, Klasse, Ziel, Scope und Imports.
 
@@ -27,7 +35,7 @@ Build unter Linux beziehungsweise Windows:
 
 Ergebnis:
 
-    Artifacts/Modules/BEEP/BEEP.R4X
+    Artifacts/Modules/Beep/BEEP.R4X
 
 Contract:
 - fachlicher Einstieg: `r4_app_main`; das SDK exportiert `R4XStart`

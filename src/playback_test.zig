@@ -2,9 +2,10 @@ const std = @import("std");
 const r4os = @import("r4os");
 const app = @import("main.zig");
 const a = r4os.abi;
+const a2 = r4os.platform2.abi;
 const t = std.testing;
 
-// Only the external R4SYS callbacks are modeled. The application, WriteCursor,
+// Only the external R4SYS callbacks are modeled. The application, total Writer/PcmSourcePacer,
 // framing/response validation and owned AudioStream are the product code.
 const Host = struct {
     var now: u64 = 0;
@@ -20,6 +21,9 @@ const Host = struct {
     var closes: usize = 0;
     var connections_closed: usize = 0;
     var close_result: i32 = 0;
+    var timeout_at: usize = 0;
+    var close_after_calls: usize = 0;
+    var clock_after_calls: usize = 0;
     var first_write: ?u64 = null;
     var largest_source_lead: u64 = 0;
     var pcm: [192_000]u8 = undefined;
@@ -38,6 +42,9 @@ const Host = struct {
         closes = 0;
         connections_closed = 0;
         close_result = 0;
+        timeout_at = 0;
+        close_after_calls = 0;
+        clock_after_calls = 0;
         first_write = null;
         largest_source_lead = 0;
     }
@@ -49,7 +56,7 @@ const Host = struct {
         now += count;
     }
     fn clock(out: *a.MonotonicClockInfo) callconv(.c) i32 {
-        out.* = .{ .event_effective_hz = hz };
+        out.* = .{ .flags = a.monotonic_clock_flag_valid, .source = 1, .generation = if (clock_after_calls != 0 and calls >= clock_after_calls) 2 else 1, .resolution_ns = 1, .instant_ns = now * 1_000_000, .event_requested_hz = hz, .event_effective_hz = hz };
         return 1;
     }
     fn output(_: [*]const u8, len: u32) callconv(.c) i32 {
@@ -77,6 +84,7 @@ const Host = struct {
                 const began = now;
                 now += write_cost;
                 calls += 1;
+                if (timeout_at != 0 and calls == timeout_at) return a.service_api_result_timeout;
                 const n = @sizeOf(a.AudioServiceStreamWriteRequest);
                 if (len < n) return -1;
                 const req = std.mem.bytesToValue(a.AudioServiceStreamWriteRequest, bytes[0..n]);
@@ -104,18 +112,30 @@ const Host = struct {
         return @sizeOf(@TypeOf(reply));
     }
 
+    fn shouldClose(_: *const a2.R4XStartContext2) callconv(.c) u32 {
+        return @intFromBool(close_after_calls != 0 and calls >= close_after_calls);
+    }
     fn run(args: [:0]const u8, ticks_available: bool) i32 {
-        const raw = a.R4XStartContext{ .args = @intFromPtr(args.ptr), .args_len = @intCast(args.len) };
-        var sys: a.R4XStartR4Sys = .{};
+        var raw: a2.R4XStartContext2 = .{ .args = @intFromPtr(args.ptr), .args_len = @intCast(args.len), .app_class = 1, .flags = a.r4xstart_flag_imports_valid | a.r4xstart_flag_close_supported, .should_close = @intFromPtr(@as(a2.R4XStartShouldCloseFn2, &shouldClose)) };
+        var sys: a2.R4XStartR4Sys2 = .{};
         sys.ticks = if (ticks_available) @intFromPtr(&ticks) else 0;
         sys.sleep_ticks = if (sleep_available) @intFromPtr(&sleep) else 0;
-        sys.monotonic_clock = @intFromPtr(&clock);
+        sys.monotonic_clock = if (ticks_available) @intFromPtr(&clock) else 0;
         sys.write = @intFromPtr(&output);
         sys.service_open = @intFromPtr(&open);
         sys.service_close = @intFromPtr(&disconnect);
         sys.service_call = @intFromPtr(&call);
-        const audio: a.R4XStartR4Audio = .{};
-        var instance = r4os.App{ .raw = &raw, .bundle = .{ .raw = &raw, .sys = &sys, .audio = &audio }, .profile = .console };
+        const audio: a2.R4XStartR4Audio2 = .{};
+        const imports = [_]a.R4XStartImport{
+            .{ .group_id = 1, .resolved_version = 2, .table = @intFromPtr(&sys) },
+            .{ .group_id = 5, .resolved_version = 2, .table = @intFromPtr(&audio) },
+        };
+        raw.imports = @intFromPtr(&imports);
+        raw.import_count = imports.len;
+        var instance = switch (r4os.App2.init(&raw, .console)) {
+            .value => |value| value,
+            .failure => return -99,
+        };
         return app.r4_app_main(&instance);
     }
 };
@@ -199,4 +219,33 @@ test "BEEP rejects unavailable timing before creating a stream" {
     Host.sleep_available = false;
     try t.expect(Host.run("/SELFTEST", true) != 0);
     try t.expectEqual(@as(usize, 0), Host.opens);
+}
+
+test "BEEP total deadline uncertainty close and clock replacement keep exact source ownership" {
+    Host.reset();
+    Host.initial_busy = 100_000;
+    Host.write_cost = 1;
+    try t.expect(Host.run("/SELFTEST", true) != 0);
+    try t.expectEqual(@as(usize, 0), Host.accepted);
+    try t.expectEqual(@as(u64, 5000), Host.now);
+    try t.expectEqual(@as(usize, 1), Host.closes);
+    try t.expectEqual(@as(usize, 1), Host.connections_closed);
+    Host.reset();
+    Host.fragmented = true;
+    Host.timeout_at = 2;
+    try t.expect(Host.run("/SELFTEST", true) != 0);
+    try t.expectEqual(@as(usize, 2), Host.calls);
+    try t.expectEqual(@as(usize, 400), Host.accepted);
+    try t.expectEqual(@as(usize, 1), Host.closes);
+    Host.reset();
+    Host.close_after_calls = 1;
+    try t.expect(Host.run("/SELFTEST", true) != 0);
+    try t.expectEqual(@as(usize, 1), Host.calls);
+    try t.expectEqual(@as(usize, 1), Host.closes);
+    try t.expectEqual(@as(usize, 1), Host.connections_closed);
+    Host.reset();
+    Host.clock_after_calls = 1;
+    try t.expect(Host.run("/SELFTEST", true) != 0);
+    try t.expectEqual(@as(usize, 1), Host.calls);
+    try t.expectEqual(@as(usize, 1), Host.closes);
 }

@@ -1,4 +1,5 @@
 const r4os = @import("r4os");
+const time = r4os.time_contract.checked;
 
 const sample_rate: u32 = 48_000;
 const channels: usize = 2;
@@ -16,36 +17,7 @@ comptime {
     if (@as(u64, selftest_blocks) * block_frames < audio_prefill_frames) @compileError("BEEP selftest must cover the full 160-ms source lead");
 }
 
-const PlaybackPacer = struct {
-    timer_hz: u64,
-    end_scaled: ?u128 = null,
-
-    fn accepted(self: *PlaybackPacer, sys: r4os.r4sys.Context, bytes: usize, write_started: u64) void {
-        // Absolute source schedule in ticks * sample_rate, preserving fractions.
-        // RPC time counts too; an expired schedule grants no future burst credit.
-        const start = @as(u128, write_started) * sample_rate;
-        const end = @max(self.end_scaled orelse start, start) + @as(u128, bytes / frame_bytes) * self.timer_hz;
-        self.end_scaled = end;
-        // This is a source lead, not a receipt that the device has started.
-        self.waitUntil(sys, end -| (@as(u128, audio_prefill_frames) * self.timer_hz));
-    }
-
-    fn drain(self: *PlaybackPacer, sys: r4os.r4sys.Context) void {
-        const end = self.end_scaled orelse return;
-        self.waitUntil(sys, end);
-        self.end_scaled = null;
-    }
-
-    fn waitUntil(_: *const PlaybackPacer, sys: r4os.r4sys.Context, deadline: u128) void {
-        while (true) {
-            const now = @as(u128, sys.ticks()) * sample_rate;
-            if (now >= deadline) return;
-            sys.sleepTicks(@intCast((deadline - now + sample_rate - 1) / sample_rate));
-        }
-    }
-};
-
-pub fn r4_app_main(app: *r4os.App) i32 {
+pub fn r4_app_main(app: *r4os.App2) i32 {
     const sys = app.system();
     const audio = app.audio() orelse return r4os.abi.err_no_group;
     const selftest = hasArg(app.args(), selftest_arg);
@@ -53,12 +25,12 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     fillSquare(pcm[0..]);
 
     sys.println(if (selftest) "BEEP selftest" else "BEEP AUDIO TEST");
-    const timer_hz = sys.monotonicHz();
-    if (timer_hz == 0 or !sys.hasFn("ticks") or !sys.hasFn("sleep_ticks")) {
+    const initial = sampleClock(sys) orelse {
         sys.println("AUDIO CLOCK UNAVAILABLE");
         return 1;
-    }
-    var stream = switch (audio.openStream(sample_rate, channels, .s16le, r4os.app_audio.default_volume, r4os.time_contract.timeoutForever())) {
+    };
+    var pacer = r4os.pcm_source.Pacer.init(sample_rate, frame_bytes, audio_prefill_frames, initial) catch return 1;
+    var stream = switch (audio.openStream(sample_rate, channels, .s16le, r4os.app_audio.default_volume, operationTimeout())) {
         .stream => |value| value,
         else => {
             sys.println("AUDIO STREAM FAILED");
@@ -72,16 +44,15 @@ pub fn r4_app_main(app: *r4os.App) i32 {
 
     var ok = true;
     var remaining: u32 = if (selftest) selftest_blocks else block_count;
-    var pacer = PlaybackPacer{ .timer_hz = timer_hz };
     while (remaining > 0) : (remaining -= 1) {
         if (!writeAudioBlock(sys, &stream, pcm[0..], &pacer)) {
             ok = false;
             break;
         }
     }
-    if (ok) pacer.drain(sys);
+    if (ok) ok = waitSource(sys, &pacer, true);
 
-    if (switch (stream.close(r4os.time_contract.timeoutForever())) {
+    if (switch (stream.close(operationTimeout())) {
         .ok => false,
         else => true,
     }) ok = false;
@@ -93,23 +64,51 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     return 1;
 }
 
-fn writeAudioBlock(sys: r4os.r4sys.Context, stream: *r4os.AudioStream, data: []const u8, pacer: *PlaybackPacer) bool {
-    var cursor = r4os.app_audio.WriteCursor.init(data.len, frame_bytes) orelse return false;
-    while (!cursor.done()) {
-        const write_started = sys.ticks();
-        const advance = cursor.apply(stream.write(data[cursor.accepted..], r4os.time_contract.timeoutForever()));
-        switch (advance.outcome) {
-            .complete => {
-                if (advance.accepted != 0) pacer.accepted(sys, advance.accepted, write_started);
-                return cursor.done();
-            },
-            .retry => {
-                if (advance.accepted != 0) pacer.accepted(sys, advance.accepted, write_started) else sys.sleepTicks(1);
-            },
-            .timed_out, .failure, .invalid => return false,
+fn operationTimeout() r4os.abi.R4Timeout {
+    return r4os.time_contract.timeoutFinite(.{ .nanoseconds = 5_000_000_000 });
+}
+
+fn sampleClock(sys: r4os.r4sys.Context) ?time.ClockSample {
+    if (!sys.hasFn("sleep_ticks")) return null;
+    var info: r4os.abi.MonotonicClockInfo = .{};
+    if (sys.monotonicClock(&info) <= 0) return null;
+    const sample = time.ClockSample.fromInfo(info) catch return null;
+    return if (sample.identity.tick_hz == 0) null else sample;
+}
+
+fn waitSource(sys: r4os.r4sys.Context, pacer: *r4os.pcm_source.Pacer, finish: bool) bool {
+    while (!sys.programShouldClose()) {
+        const now = sampleClock(sys) orelse return false;
+        const deadline = pacer.deadline(now, finish) catch return false;
+        if (deadline.wait_ns == 0) return true;
+        const ticks = time.scaleCeil(deadline.wait_ns, now.identity.tick_hz, 1_000_000_000) catch return false;
+        sys.sleepTicks(ticks);
+    }
+    return false;
+}
+
+fn writeAudioBlock(sys: r4os.r4sys.Context, stream: *r4os.AudioStream, data: []const u8, pacer: *r4os.pcm_source.Pacer) bool {
+    var writer: r4os.audio_write.Writer = undefined;
+    if (r4os.audio_write.Writer.init(.{ .address = @intFromPtr(data.ptr), .length = data.len }, .fromStream(stream), operationTimeout(), &writer) != 0) return false;
+    var accepted: u64 = 0;
+    while (true) {
+        const began = sampleClock(sys) orelse return false;
+        var progress: r4os.audio_write.Progress = undefined;
+        if (writer.writeBounded(64, sys.programShouldClose(), &progress) != 0) return false;
+        const prefix = progress.io.bytes - accepted;
+        accepted = progress.io.bytes;
+        if (prefix != 0) {
+            _ = pacer.accepted(prefix, began) catch return false;
+            if (!waitSource(sys, pacer, false)) return false;
+        }
+        const outcome: r4os.stream_transfer.Outcome = @enumFromInt(progress.io.outcome);
+        switch (outcome) {
+            .complete => return true,
+            .pending => {},
+            .would_block => if (prefix == 0) sys.sleepTicks(1),
+            else => return false,
         }
     }
-    return true;
 }
 
 fn fillSquare(out: []u8) void {

@@ -239,7 +239,7 @@ test "BEEP total deadline uncertainty close and clock replacement keep exact sou
     try t.expectEqual(@as(usize, 1), Host.closes);
     Host.reset();
     Host.close_after_calls = 1;
-    try t.expect(Host.run("/SELFTEST", true) != 0);
+    try t.expectEqual(@as(i32, 0), Host.run("/SELFTEST", true));
     try t.expectEqual(@as(usize, 1), Host.calls);
     try t.expectEqual(@as(usize, 1), Host.closes);
     try t.expectEqual(@as(usize, 1), Host.connections_closed);
@@ -248,4 +248,10 @@ test "BEEP total deadline uncertainty close and clock replacement keep exact sou
     try t.expect(Host.run("/SELFTEST", true) != 0);
     try t.expectEqual(@as(usize, 1), Host.calls);
     try t.expectEqual(@as(usize, 1), Host.closes);
+    Host.reset();
+    Host.close_after_calls = 1;
+    Host.close_result = a.service_api_result_busy;
+    try t.expect(Host.run("/SELFTEST", true) != 0);
+    try t.expectEqual(@as(usize, 1), Host.closes);
+    try t.expectEqual(@as(usize, 0), Host.connections_closed);
 }

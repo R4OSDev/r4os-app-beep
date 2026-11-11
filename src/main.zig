@@ -52,10 +52,16 @@ pub fn r4_app_main(app: *r4os.App2) i32 {
     }
     if (ok) ok = waitSource(sys, &pacer, true);
 
-    if (switch (stream.close(operationTimeout())) {
-        .ok => false,
-        else => true,
-    }) ok = false;
+    const stopped = sys.programShouldClose();
+    const closed = switch (stream.close(operationTimeout())) {
+        .ok => true,
+        else => false,
+    };
+    if (stopped and closed) {
+        sys.println("BEEP stopped");
+        return 0;
+    }
+    if (!closed) ok = false;
     if (ok) {
         sys.println(if (selftest) "BEEP selftest: OK" else "AUDIO STREAM OK");
         return 0;

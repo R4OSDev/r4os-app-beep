@@ -14,8 +14,9 @@ Ungewisse Antworten werden sichtbar abgebrochen. Die Quellzeit verwendet
 gepruefte monotone Nanosekunden und rationale ganze Frames mit160msQuellvorlauf.
 Warteticks folgen der angeforderten logischen Ereignisrate. Eine fehlende
 Clock oder Frequenz verhindert Open. Ein Closewunsch beendet weitere Writes.
-Auch dieser Pfad verlangt die wirkliche Streamcloseantwort. Die bestehende
-Fehlermeldung und Exit1 bei unterbrochenem Ton bleiben erhalten.
+Auch dieser Pfad verlangt die wirkliche Streamcloseantwort. Nach deren
+Bestaetigung meldet der angeforderte Abbruch BEEP stopped und Exit0.
+Schreibfehler und ein fehlgeschlagenes Close liefern weiterhin Exit1.
 
 Teilschreibfortschritt bleibt framegenau erhalten. Busy wiederholt nur den
 noch offenen Rest, Timeout und harte Fehler brechen die Ausgabe sichtbar ab.

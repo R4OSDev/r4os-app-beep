@@ -35,7 +35,7 @@ fn waitText(sys: r4os.r4sys.Context, desk: r4os.r4desk.Context, child: *const a.
     return false;
 }
 
-pub fn r4_app_main(app: *r4os.App) i32 {
+pub fn r4_app_main(app: *r4os.App2) i32 {
     const sys = app.system();
     const dev = app.devicesLowLevel() orelse return 2;
     const desk = app.desktop() orelse return 3;
